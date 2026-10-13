@@ -1,0 +1,49 @@
+trigger:
+  branches:
+    include:
+      - main
+      - feature/*
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+
+  - script: |
+      python -m pip install --upgrade pip
+      pip install -r requirements.txt pytest pytest-cov
+      pytest --cov=app --cov-report=xml:coverage.xml
+    displayName: Install and test Weather Service
+    workingDirectory: services/weather-service
+
+  - task: SonarQubePrepare@7
+    displayName: Prepare SonarQube analysis
+    inputs:
+      SonarQube: 'Atmos-SonarQube'
+      scannerMode: 'cli'
+      configMode: 'manual'
+      cliProjectKey: 'atmos-weather-service'
+      cliProjectName: 'Atmos Weather Service'
+      cliSources: 'services/weather-service/app'
+      extraProperties: |
+        sonar.python.coverage.reportPaths=services/weather-service/coverage.xml
+        sonar.exclusions=**/__pycache__/**
+
+  - task: SonarQubeAnalyze@7
+    displayName: Analyze Weather Service
+
+  - task: SonarQubePublish@7
+    displayName: Publish quality gate
+    inputs:
+      pollingTimeoutSec: '300'

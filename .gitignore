@@ -1,0 +1,29 @@
+# Env Variables file
+.env
+.env.*
+!.env.example
+.venv/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+frontend/coverage/
+.idea/
+.vscode/
+.DS_Store
+
+# Frontend dependencies and generated files
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Python generated files
+services/user-service/app/__pycache__/
+services/weather-service/app/__pycache__/
+services/weather-service/app/providers/__pycache__/
+services/weather-service/tests/__pycache__/
+__pycache__/
+*.pyc
+
+# Windows ZIP metadata
+*:Zone.Identifier

@@ -1,0 +1,54 @@
+trigger:
+  branches:
+    include:
+      - main
+      - feature/*
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+
+  - task: NodeTool@0
+    displayName: Install Node.js
+    inputs:
+      versionSpec: '22.x'
+
+  - script: npm ci
+    displayName: Install frontend dependencies
+    workingDirectory: frontend
+
+  - script: npm run lint
+    displayName: TypeScript validation
+    workingDirectory: frontend
+
+  - script: npm run build
+    displayName: Build frontend
+    workingDirectory: frontend
+
+  - task: SonarQubePrepare@7
+    displayName: Prepare SonarQube analysis
+    inputs:
+      SonarQube: 'Atmos-SonarQube'
+      scannerMode: 'cli'
+      configMode: 'manual'
+      cliProjectKey: 'atmos-frontend'
+      cliProjectName: 'Atmos Frontend'
+      cliSources: 'frontend/src'
+      extraProperties: |
+        sonar.exclusions=**/node_modules/**,**/dist/**
+
+  - task: SonarQubeAnalyze@7
+    displayName: Analyze frontend
+
+  - task: SonarQubePublish@7
+    displayName: Publish quality gate
+    inputs:
+      pollingTimeoutSec: '300'

@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: atmos
+      POSTGRES_USER: atmos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - atmos-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atmos -d atmos"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  weather-service:
+    build: ./services/weather-service
+    environment:
+      CORS_ORIGINS: http://localhost:5173
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+  user-service:
+    build: ./services/user-service
+    environment:
+      POSTGRES_USER: atmos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: atmos
+      CORS_ORIGINS: http://localhost:5173
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8002:8002"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_WEATHER_API_URL: http://localhost:8001
+      VITE_USER_API_URL: http://localhost:8002
+    ports:
+      - "5173:5173"
+    depends_on:
+      - weather-service
+      - user-service
+
+volumes:
+  atmos-postgres:
