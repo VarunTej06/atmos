@@ -1,0 +1,163 @@
+trigger: none
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+  - name: environment
+    displayName: 'Target Deployment Environment'
+    type: string
+    default: 'dev'
+    values:
+      - dev
+      - staging
+      - prod
+
+  - name: acrName
+    displayName: 'Azure Container Registry Name'
+    type: string
+    default: 'atmoscr'
+
+  - name: imageTag
+    displayName: 'Container Image Tag'
+    type: string
+    default: 'latest'
+
+  - name: azureSubscription
+    displayName: 'Azure Service Connection'
+    type: string
+    default: 'Atmos-Azure-Connection'
+
+  - name: resourceGroup
+    displayName: 'Azure Resource Group'
+    type: string
+    default: 'atmos-rg'
+
+  - name: containerAppEnvironment
+    displayName: 'Azure Container Apps Environment'
+    type: string
+    default: 'atmos-env'
+
+  - name: frontendAppName
+    displayName: 'Frontend Container App Name'
+    type: string
+    default: 'atmos-frontend'
+
+  - name: weatherAppName
+    displayName: 'Weather Service Container App Name'
+    type: string
+    default: 'atmos-weather-service'
+
+stages:
+  - stage: DeployToAzureContainerApps
+    displayName: 'Deploy to Azure Container Apps (${{ parameters.environment }})'
+    jobs:
+      - deployment: Deploy
+        displayName: 'Deploy Atmos Containers'
+        environment: '${{ parameters.environment }}'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+
+                - task: AzureCLI@2
+                  displayName: '1. Login to Azure and ACR'
+                  inputs:
+                    azureSubscription: '${{ parameters.azureSubscription }}'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "Logging into Azure Container Registry ${{ parameters.acrName }}..."
+                      az acr login --name ${{ parameters.acrName }}
+
+                - task: AzureCLI@2
+                  displayName: '2. Deploy Weather Service to Container Apps'
+                  inputs:
+                    azureSubscription: '${{ parameters.azureSubscription }}'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      WEATHER_IMAGE="${{ parameters.acrName }}.azurecr.io/${{ parameters.weatherAppName }}:${{ parameters.imageTag }}"
+                      echo "Deploying Weather Service with image: $WEATHER_IMAGE"
+
+                      az containerapp update \
+                        --name ${{ parameters.weatherAppName }} \
+                        --resource-group ${{ parameters.resourceGroup }} \
+                        --image "$WEATHER_IMAGE" \
+                        --set-env-vars CORS_ORIGINS="*" \
+                        || az containerapp create \
+                            --name ${{ parameters.weatherAppName }} \
+                            --resource-group ${{ parameters.resourceGroup }} \
+                            --environment ${{ parameters.containerAppEnvironment }} \
+                            --image "$WEATHER_IMAGE" \
+                            --target-port 8001 \
+                            --ingress external \
+                            --env-vars CORS_ORIGINS="*"
+
+                - task: AzureCLI@2
+                  displayName: '3. Deploy Frontend to Container Apps'
+                  inputs:
+                    azureSubscription: '${{ parameters.azureSubscription }}'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      FRONTEND_IMAGE="${{ parameters.acrName }}.azurecr.io/${{ parameters.frontendAppName }}:${{ parameters.imageTag }}"
+                      echo "Deploying Frontend with image: $FRONTEND_IMAGE"
+
+                      az containerapp update \
+                        --name ${{ parameters.frontendAppName }} \
+                        --resource-group ${{ parameters.resourceGroup }} \
+                        --image "$FRONTEND_IMAGE" \
+                        || az containerapp create \
+                            --name ${{ parameters.frontendAppName }} \
+                            --resource-group ${{ parameters.resourceGroup }} \
+                            --environment ${{ parameters.containerAppEnvironment }} \
+                            --image "$FRONTEND_IMAGE" \
+                            --target-port 80 \
+                            --ingress external
+
+                - task: AzureCLI@2
+                  displayName: '4. Run Health Checks'
+                  inputs:
+                    azureSubscription: '${{ parameters.azureSubscription }}'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "Retrieving endpoints for health checks..."
+                      WEATHER_URL=$(az containerapp show --name ${{ parameters.weatherAppName }} --resource-group ${{ parameters.resourceGroup }} --query properties.configuration.ingress.fqdn -o tsv)
+                      FRONTEND_URL=$(az containerapp show --name ${{ parameters.frontendAppName }} --resource-group ${{ parameters.resourceGroup }} --query properties.configuration.ingress.fqdn -o tsv)
+
+                      echo "Verifying Weather Service health at https://${WEATHER_URL}/health..."
+                      for i in {1..12}; do
+                        STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://${WEATHER_URL}/health" || true)
+                        if [ "$STATUS" = "200" ]; then
+                          echo "Weather Service is healthy (HTTP 200)!"
+                          break
+                        fi
+                        echo "Waiting for Weather Service... status=$STATUS"
+                        sleep 10
+                      done
+                      if [ "$STATUS" != "200" ]; then
+                        echo "Weather Service failed health check (HTTP $STATUS)"
+                        exit 1
+                      fi
+
+                      echo "Verifying Frontend availability at https://${FRONTEND_URL}/..."
+                      for i in {1..12}; do
+                        STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://${FRONTEND_URL}/" || true)
+                        if [ "$STATUS" = "200" ]; then
+                          echo "Frontend is healthy (HTTP 200)!"
+                          break
+                        fi
+                        echo "Waiting for Frontend... status=$STATUS"
+                        sleep 10
+                      done
+                      if [ "$STATUS" != "200" ]; then
+                        echo "Frontend failed health check (HTTP $STATUS)"
+                        exit 1
+                      fi
+
+                      echo "All container app health checks passed successfully!"
+

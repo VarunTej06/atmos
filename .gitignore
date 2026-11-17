@@ -18,7 +18,6 @@ frontend/dist/
 frontend/.vite/
 
 # Python generated files
-services/user-service/app/__pycache__/
 services/weather-service/app/__pycache__/
 services/weather-service/app/providers/__pycache__/
 services/weather-service/tests/__pycache__/

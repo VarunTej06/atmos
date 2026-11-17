@@ -1,0 +1,230 @@
+trigger:
+  branches:
+    include:
+      - main
+      - feature/*
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+  - name: acrName
+    displayName: 'Azure Container Registry Name'
+    type: string
+    default: 'atmoscr'
+  - name: pushImages
+    displayName: 'Push images to ACR'
+    type: boolean
+    default: true
+  - name: azureSubscription
+    displayName: 'Azure Service Connection'
+    type: string
+    default: 'Atmos-Azure-Connection'
+
+variables:
+  imageTag: '$(Build.BuildId)'
+  frontendImageName: 'atmos-frontend'
+  weatherServiceImageName: 'atmos-weather-service'
+
+stages:
+  - stage: BuildAndTestFrontend
+    displayName: 'Build & Test Frontend'
+    jobs:
+      - job: FrontendCI
+        displayName: 'Frontend CI'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: NodeTool@0
+            displayName: 'Install Node.js 22'
+            inputs:
+              versionSpec: '22.x'
+
+          - script: npm ci
+            displayName: 'Install dependencies'
+            workingDirectory: frontend
+
+          - script: npm run lint
+            displayName: 'TypeScript validation'
+            workingDirectory: frontend
+
+          - script: npm run test:coverage
+            displayName: 'Run Vitest with coverage'
+            workingDirectory: frontend
+
+          - script: npm run build
+            displayName: 'Build production bundle'
+            workingDirectory: frontend
+
+          - task: PublishCodeCoverageResults@2
+            displayName: 'Publish frontend code coverage'
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/frontend/coverage/lcov.info'
+
+  - stage: BuildAndTestBackend
+    displayName: 'Build & Test Backend'
+    jobs:
+      - job: BackendCI
+        displayName: 'Backend CI'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: UsePythonVersion@0
+            displayName: 'Install Python 3.12'
+            inputs:
+              versionSpec: '3.12'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt pytest pytest-cov pytest-asyncio
+            displayName: 'Install dependencies'
+            workingDirectory: services/weather-service
+
+          - script: pytest --cov=app --cov-report=xml:coverage.xml
+            displayName: 'Run Pytest with coverage XML'
+            workingDirectory: services/weather-service
+
+          - task: PublishCodeCoverageResults@2
+            displayName: 'Publish backend code coverage'
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/services/weather-service/coverage.xml'
+
+  - stage: SonarQubeAnalysis
+    displayName: 'SonarQube Analysis'
+    dependsOn:
+      - BuildAndTestFrontend
+      - BuildAndTestBackend
+    jobs:
+      - job: SonarFrontend
+        displayName: 'Analyze Frontend'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: NodeTool@0
+            displayName: 'Install Node.js 22'
+            inputs:
+              versionSpec: '22.x'
+
+          - script: npm ci && npm run test:coverage
+            displayName: 'Generate frontend test coverage'
+            workingDirectory: frontend
+
+          - task: SonarQubePrepare@7
+            displayName: 'Prepare SonarQube analysis for Frontend'
+            inputs:
+              SonarQube: 'Atmos-SonarQube'
+              scannerMode: 'cli'
+              configMode: 'manual'
+              cliProjectKey: 'atmos-frontend'
+              cliProjectName: 'Atmos Frontend'
+              cliSources: 'frontend/src'
+              extraProperties: |
+                sonar.javascript.lcov.reportPaths=frontend/coverage/lcov.info
+                sonar.exclusions=**/node_modules/**,**/dist/**
+
+          - task: SonarQubeAnalyze@7
+            displayName: 'Analyze frontend'
+
+          - task: SonarQubePublish@7
+            displayName: 'Publish quality gate'
+            inputs:
+              pollingTimeoutSec: '300'
+
+      - job: SonarWeatherService
+        displayName: 'Analyze Weather Service'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: UsePythonVersion@0
+            displayName: 'Install Python 3.12'
+            inputs:
+              versionSpec: '3.12'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt pytest pytest-cov pytest-asyncio
+              pytest --cov=app --cov-report=xml:coverage.xml
+            displayName: 'Generate backend test coverage'
+            workingDirectory: services/weather-service
+
+          - task: SonarQubePrepare@7
+            displayName: 'Prepare SonarQube analysis for Weather Service'
+            inputs:
+              SonarQube: 'Atmos-SonarQube'
+              scannerMode: 'cli'
+              configMode: 'manual'
+              cliProjectKey: 'atmos-weather-service'
+              cliProjectName: 'Atmos Weather Service'
+              cliSources: 'services/weather-service/app'
+              extraProperties: |
+                sonar.python.coverage.reportPaths=services/weather-service/coverage.xml
+                sonar.exclusions=**/__pycache__/**
+
+          - task: SonarQubeAnalyze@7
+            displayName: 'Analyze Weather Service'
+
+          - task: SonarQubePublish@7
+            displayName: 'Publish quality gate'
+            inputs:
+              pollingTimeoutSec: '300'
+
+  - stage: DockerBuild
+    displayName: 'Docker Build'
+    dependsOn:
+      - BuildAndTestFrontend
+      - BuildAndTestBackend
+    jobs:
+      - job: BuildImages
+        displayName: 'Build Multi-Stage Docker Images'
+        steps:
+          - checkout: self
+
+          - script: |
+              docker build -f frontend/Dockerfile.prod -t $(frontendImageName):$(imageTag) -t $(frontendImageName):latest frontend
+            displayName: 'Build Frontend Production Image'
+
+          - script: |
+              docker build -f services/weather-service/Dockerfile.prod -t $(weatherServiceImageName):$(imageTag) -t $(weatherServiceImageName):latest services/weather-service
+            displayName: 'Build Weather Service Production Image'
+
+  - stage: PushToACR
+    displayName: 'Push to ACR'
+    dependsOn:
+      - DockerBuild
+    condition: and(succeeded(), eq('${{ parameters.pushImages }}', true))
+    jobs:
+      - job: PushImagesToACR
+        displayName: 'Push Images to Azure Container Registry'
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: 'Login to ACR and Push Images'
+            inputs:
+              azureSubscription: '${{ parameters.azureSubscription }}'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az acr login --name ${{ parameters.acrName }}
+
+                # Tag and push Frontend image
+                docker build -f frontend/Dockerfile.prod -t ${{ parameters.acrName }}.azurecr.io/$(frontendImageName):$(imageTag) -t ${{ parameters.acrName }}.azurecr.io/$(frontendImageName):latest frontend
+                docker push ${{ parameters.acrName }}.azurecr.io/$(frontendImageName):$(imageTag)
+                docker push ${{ parameters.acrName }}.azurecr.io/$(frontendImageName):latest
+
+                # Tag and push Weather Service image
+                docker build -f services/weather-service/Dockerfile.prod -t ${{ parameters.acrName }}.azurecr.io/$(weatherServiceImageName):$(imageTag) -t ${{ parameters.acrName }}.azurecr.io/$(weatherServiceImageName):latest services/weather-service
+                docker push ${{ parameters.acrName }}.azurecr.io/$(weatherServiceImageName):$(imageTag)
+                docker push ${{ parameters.acrName }}.azurecr.io/$(weatherServiceImageName):latest
+
